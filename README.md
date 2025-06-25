@@ -14,7 +14,7 @@ Before you start, it's essential to generate a Deepgram API key to use in this p
 
 - .NET 8.0 SDK or later
 - A Deepgram API key
-- A microphone for voice input
+- Modern web browser with microphone support
 
 ## Quickstart
 
