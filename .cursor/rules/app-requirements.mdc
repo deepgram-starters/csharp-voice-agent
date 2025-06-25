@@ -1,58 +1,315 @@
 ---
 description: Starter App Requirements
-globs: index.ts, src/
+globs:  src/,Program.cs
 alwaysApply: false
 ---
 
-# {Language / Framework} Starter App Requirements
+# C# Agent Starter App Requirements
 
-> This section can be removed: 
-
-> 1. To Get started check out the Docs on Using Cursor Rules: 
-> https://learn-cursor.com/en/blog/posts/cursor-rules-guide
-> https://learn-cursor.com/en/blog/posts/cursor-rules-advanced
-> https://forum.cursor.com/t/using-the-project-rules-in-0-45-2/44447/3
-
-> 2. Set your file patterns to match the application files in this project example: globs: index.ts, src/*.ts, etc
 
 ## Core Requirements
-- SHOULD live in a single file with minimal dependencies, i.e. `index.ts`
-- SHOULD use {specific languages or frameworks}
-- SHOULD use the latest version of the official SDK where provided
-- MUST falls back to manual integration using the API spec where there is no SDK
+- SHOULD live in a single file with minimal dependencies, i.e. `Program.cs`
+- Should have a `Agent.csproj` XML file defining how the project is built, run, and managed
+- SHOULD use the .NET framework and C# language
+- SHOULD use the latest version of the official Deepgram .NET SDK version `6.2.1`
 - MUST run in a terminal
 - MUST be usable in command line with a single command
-- MUST be able to run it with `--serve` flag that will start it as a http server
-- MUST get API keys and other sensitive config from a `.env` file
+- MUST Run with `dotnet run Program.cs`
+- MUST get API keys and other sensitive config from a terminal export statement `DEEPGRAM_API_KEY = 'YOUR_DEEPGRAM_API_KEY'`
 - MUST provide help code comments explaining the main sections of the app
 
 ## App Requirements:
-- SHOULD be able to use the Deepgram {Product} API
-- MUST exit gracefully without any API errors
-- MUST Runs in terminal as a CLI to connect to the API, and follows a predefined script
-- MUST Runs with --serve
-
-> Add additional App requirements here
-
-## CLI Requirements:
-- MUST Connect to the API
-- MUST Start to run through a set script of interactions
+- MUST launch a web server that can act as a basic proxy to the agent
+- MUST allow a browser client to open an http file that is an empty web page
+- MUST allow the user to connect their microphone in the browser
+- MUST allow the user user to speak via their microphone in the browser
+- MUST not have any UI elements
+- MUST have the terminal display the interactions with agent
 - MUST Listen for the API output and prints it in the terminal
-- MUST Listen for the API response message and prints it in the terminal
-- MUST Listen for the API response binary message, saves it to and output file and displays the path in the terminal
-- MUST Gracefully closes the connection
+- MUST Listen for the API response messages and print it in the terminal
+- MUST Gracefully closes the connection with the agent
+- MUST exit gracefully without any Agent API errors
+- MUST Runs in terminal to connect to the Agent API, and follows a predefined script of interactions.
 
-> Add additional App requirements here
+## Example Code
 
-## API Requirements:
+```c#
+using Deepgram.Logger;
+using Deepgram.Microphone;
+using Deepgram.Models.Authenticate.v1;
+using Deepgram.Models.Agent.v2.WebSocket;
+using System.Collections.Generic;
+using PortAudioSharp;
 
-- MUST have a WebSocket server
-- MUST set a WebSocket server on ws://localhost:3000
-- MUST set an Upstream agent connection
-- MUST Connect to the API
+namespace SampleApp
+{
+    class Program
+    {
+        static async Task Main(string[] args)
+        {
+            try
+            {
+                // Initialize Library with default logging
+                // Normal logging is "Info" level
+                Deepgram.Library.Initialize(LogLevel.Debug);
+                // OR very chatty logging
+                //Deepgram.Library.Initialize(LogLevel.Verbose); // LogLevel.Default, LogLevel.Debug, LogLevel.Verbose
 
-> Add additional App requirements here
+                // Initialize the microphone library
+                Console.WriteLine("Initializing microphone library...");
+                try
+                {
+                    Deepgram.Microphone.Library.Initialize();
+                    Console.WriteLine("Microphone library initialized successfully.");
 
+                    // Get default input device
+                    int defaultDevice = PortAudio.DefaultInputDevice;
+                    if (defaultDevice == PortAudio.NoDevice)
+                    {
+                        Console.WriteLine("Error: No default input device found.");
+                        return;
+                    }
+
+                    var deviceInfo = PortAudio.GetDeviceInfo(defaultDevice);
+                    Console.WriteLine($"Using default input device: {deviceInfo.name}");
+                    Console.WriteLine($"Sample rate: {deviceInfo.defaultSampleRate}");
+                    Console.WriteLine($"Channels: {deviceInfo.maxInputChannels}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error initializing microphone library: {ex.Message}");
+                    return;
+                }
+
+                Console.WriteLine("\n\nPress any key to stop and exit...\n\n\n");
+
+                // Set "DEEPGRAM_API_KEY" environment variable to your Deepgram API Key
+                DeepgramWsClientOptions options = new DeepgramWsClientOptions(null, null, true);
+                var agentClient = ClientFactory.CreateAgentWebSocketClient(apiKey: "", options: options);
+
+                // current time
+                var lastAudioTime = DateTime.Now;
+                var audioFileCount = 0;
+
+                // Subscribe to the EventResponseReceived event
+                await agentClient.Subscribe(new EventHandler<OpenResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e.Type} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<AudioResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e.Type} received");
+
+                    // if the last audio response is more than 5 seconds ago, add a wav header
+                    if (DateTime.Now.Subtract(lastAudioTime).TotalSeconds > 7)
+                    {
+                        audioFileCount = audioFileCount + 1; // increment the audio file count
+
+                        // delete the file if it exists
+                        if (File.Exists($"output_{audioFileCount}.wav"))
+                        {
+                            File.Delete($"output_{audioFileCount}.wav");
+                        }
+
+                        using (BinaryWriter writer = new BinaryWriter(File.Open($"output_{audioFileCount}.wav", FileMode.Append)))
+                        {
+                            Console.WriteLine("Adding WAV header to output.wav");
+                            byte[] wavHeader = new byte[44];
+                            int sampleRate = 48000;
+                            short bitsPerSample = 16;
+                            short channels = 1;
+                            int byteRate = sampleRate * channels * (bitsPerSample / 8);
+                            short blockAlign = (short)(channels * (bitsPerSample / 8));
+
+                            wavHeader[0] = 0x52; // R
+                            wavHeader[1] = 0x49; // I
+                            wavHeader[2] = 0x46; // F
+                            wavHeader[3] = 0x46; // F
+                            wavHeader[4] = 0x00; // Placeholder for file size (will be updated later)
+                            wavHeader[5] = 0x00; // Placeholder for file size (will be updated later)
+                            wavHeader[6] = 0x00; // Placeholder for file size (will be updated later)
+                            wavHeader[7] = 0x00; // Placeholder for file size (will be updated later)
+                            wavHeader[8] = 0x57; // W
+                            wavHeader[9] = 0x41; // A
+                            wavHeader[10] = 0x56; // V
+                            wavHeader[11] = 0x45; // E
+                            wavHeader[12] = 0x66; // f
+                            wavHeader[13] = 0x6D; // m
+                            wavHeader[14] = 0x74; // t
+                            wavHeader[15] = 0x20; // Space
+                            wavHeader[16] = 0x10; // Subchunk1Size (16 for PCM)
+                            wavHeader[17] = 0x00; // Subchunk1Size
+                            wavHeader[18] = 0x00; // Subchunk1Size
+                            wavHeader[19] = 0x00; // Subchunk1Size
+                            wavHeader[20] = 0x01; // AudioFormat (1 for PCM)
+                            wavHeader[21] = 0x00; // AudioFormat
+                            wavHeader[22] = (byte)channels; // NumChannels
+                            wavHeader[23] = 0x00; // NumChannels
+                            wavHeader[24] = (byte)(sampleRate & 0xFF); // SampleRate
+                            wavHeader[25] = (byte)((sampleRate >> 8) & 0xFF); // SampleRate
+                            wavHeader[26] = (byte)((sampleRate >> 16) & 0xFF); // SampleRate
+                            wavHeader[27] = (byte)((sampleRate >> 24) & 0xFF); // SampleRate
+                            wavHeader[28] = (byte)(byteRate & 0xFF); // ByteRate
+                            wavHeader[29] = (byte)((byteRate >> 8) & 0xFF); // ByteRate
+                            wavHeader[30] = (byte)((byteRate >> 16) & 0xFF); // ByteRate
+                            wavHeader[31] = (byte)((byteRate >> 24) & 0xFF); // ByteRate
+                            wavHeader[32] = (byte)blockAlign; // BlockAlign
+                            wavHeader[33] = 0x00; // BlockAlign
+                            wavHeader[34] = (byte)bitsPerSample; // BitsPerSample
+                            wavHeader[35] = 0x00; // BitsPerSample
+                            wavHeader[36] = 0x64; // d
+                            wavHeader[37] = 0x61; // a
+                            wavHeader[38] = 0x74; // t
+                            wavHeader[39] = 0x61; // a
+                            wavHeader[40] = 0x00; // Placeholder for data chunk size (will be updated later)
+                            wavHeader[41] = 0x00; // Placeholder for data chunk size (will be updated later)
+                            wavHeader[42] = 0x00; // Placeholder for data chunk size (will be updated later)
+                            wavHeader[43] = 0x00; // Placeholder for data chunk size (will be updated later)
+
+                            writer.Write(wavHeader);
+                        }
+                    }
+
+                    if (e.Stream != null)
+                    {
+                        using (BinaryWriter writer = new BinaryWriter(File.Open($"output_{audioFileCount}.wav", FileMode.Append)))
+                        {
+                            writer.Write(e.Stream.ToArray());
+                        }
+                    }
+
+                    // record the last audio time
+                    lastAudioTime = DateTime.Now;
+                }));
+                await agentClient.Subscribe(new EventHandler<AgentAudioDoneResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<AgentStartedSpeakingResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<AgentThinkingResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<ConversationTextResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<FunctionCallRequestResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<UserStartedSpeakingResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<WelcomeResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<CloseResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<SettingsAppliedResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<PromptUpdatedResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received.");
+                }));
+                await agentClient.Subscribe(new EventHandler<UnhandledResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received");
+                }));
+                await agentClient.Subscribe(new EventHandler<ErrorResponse>((sender, e) =>
+                {
+                    Console.WriteLine($"----> {e} received. Error: {e.Message}");
+                }));
+
+                // Start the connection
+                var settingsConfiguration = new SettingsSchema();
+                settingsConfiguration.Agent.Think.Provider.Type = "open_ai";
+                settingsConfiguration.Agent.Think.Provider.Model = "gpt-4o-mini";
+                settingsConfiguration.Audio.Output.SampleRate = 16000;
+                settingsConfiguration.Audio.Output.Container = "wav";
+                settingsConfiguration.Audio.Input.SampleRate = 44100;
+                settingsConfiguration.Agent.Greeting = "Hello, how can I help you today?";
+                settingsConfiguration.Agent.Listen.Provider.Type = "deepgram";
+                settingsConfiguration.Agent.Listen.Provider.Model = "nova-3";
+                settingsConfiguration.Agent.Listen.Provider.Keyterms = new List<string> { "Deepgram" };
+
+                // To avoid issues with empty objects, Voice and Endpoint are instantiated as null. Construct them as needed.
+                // settingsConfiguration.Agent.Speak.Provider.Voice = new CartesiaVoice();
+                // settingsConfiguration.Agent.Speak.Provider.Voice.Id = "en-US-Wavenet-D";
+                // settingsConfiguration.Agent.Speak.Endpoint = new Endpoint();
+                // settingsConfiguration.Agent.Think.Endpoint = new Endpoint();
+
+                bool bConnected = await agentClient.Connect(settingsConfiguration);
+                if (!bConnected)
+                {
+                    Console.WriteLine("Failed to connect to Deepgram WebSocket server.");
+                    return;
+                }
+
+                // Microphone streaming
+                Console.WriteLine("Starting microphone...");
+                Microphone microphone = null;
+                try
+                {
+                    microphone = new Microphone(agentClient.SendBinary);
+                    microphone.Start();
+                    Console.WriteLine("Microphone started successfully. Waiting for audio input...");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error starting microphone: {ex.Message}");
+                    return;
+                }
+
+                // Wait for the user to press a key
+                Console.ReadKey();
+
+                // Stop the microphone
+                if (microphone != null)
+                {
+                    microphone.Stop();
+                }
+
+                // Stop the connection
+                await agentClient.Stop();
+
+                // Terminate Libraries
+                Deepgram.Microphone.Library.Terminate();
+                Deepgram.Library.Terminate();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception: {ex.Message}");
+            }
+        }
+    }
+}
+```
 ## Test Requirements
-- MUST have tests that validates the apps functionality is working
+- MUST have basic tests that validates the browser and agent functionality is working
+
+  Voice Agent Server
+    ✓ should start the server successfully
+    ✓ should establish WebSocket connection
+    ✓ should create Deepgram agent when WebSocket connects
+    ✓ should handle audio data from client
+
+
 
