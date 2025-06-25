@@ -19,6 +19,13 @@
         let isPlaying = false; // Flag to track if we're currently playing audio
         let selectedDeviceId;
 
+        // Audio buffering variables
+        let audioBuffer = []; // Accumulate audio samples
+        let bufferSize = 8192; // Target buffer size (adjustable)
+        let isBuffering = false;
+        let audioSource = null; // Current audio source
+        let nextPlayTime = 0; // Schedule next playback time
+
         async function init() {
             try {
                 // Create audio context early
@@ -83,9 +90,15 @@
                                 audioData[i / 2] = (audioBytes.charCodeAt(i) & 0xff) |
                                                  ((audioBytes.charCodeAt(i + 1) & 0xff) << 8);
                             }
-                            audioQueue.push(audioData);
-                            if (!isPlaying) {
-                                playNextInQueue();
+
+                            // Add to buffer instead of queue
+                            for (let i = 0; i < audioData.length; i++) {
+                                audioBuffer.push(audioData[i]);
+                            }
+
+                            // Start buffered playback if not already playing
+                            if (!isPlaying && audioBuffer.length >= bufferSize) {
+                                startBufferedPlayback();
                             }
                         } else if (data.type === 'text') {
                             console.log('Agent text:', data.data);
@@ -170,20 +183,22 @@
             return pcmData;
         }
 
-        async function playNextInQueue() {
-            if (audioQueue.length === 0) {
-                isPlaying = false;
-                return;
-            }
+        function startBufferedPlayback() {
+            if (audioBuffer.length === 0 || isPlaying) return;
 
             isPlaying = true;
-            const audioData = audioQueue.shift();
+            isBuffering = true;
 
             try {
                 // Ensure audio context is running
                 if (audioContext.state === 'suspended') {
-                    await audioContext.resume();
+                    audioContext.resume();
                 }
+
+                // Take samples from buffer (up to bufferSize)
+                const samplesToPlay = Math.min(bufferSize, audioBuffer.length);
+                const overlapSamples = 64; // Small overlap to prevent clicks
+                const audioData = audioBuffer.splice(0, samplesToPlay + overlapSamples);
 
                 // Create buffer with correct sample rate for agent's audio (16000Hz)
                 const buffer = audioContext.createBuffer(1, audioData.length, 16000);
@@ -195,30 +210,68 @@
                     channelData[i] = audioData[i] / 32768.0;
                 }
 
+                // Apply crossfade at the beginning and end of each chunk
+                for (let i = 0; i < overlapSamples; i++) {
+                    const fadeIn = i / overlapSamples;
+                    const fadeOut = (overlapSamples - i) / overlapSamples;
+                    channelData[i] *= fadeIn;
+                    channelData[audioData.length - overlapSamples + i] *= fadeOut;
+                }
+
                 // Create and configure source
-                const source = audioContext.createBufferSource();
-                source.buffer = buffer;
+                audioSource = audioContext.createBufferSource();
+                audioSource.buffer = buffer;
 
                 // Connect directly to destination for lower latency
-                source.connect(audioContext.destination);
+                audioSource.connect(audioContext.destination);
 
                 // Handle playback completion
-                source.onended = () => {
-                    playNextInQueue(); // Play next chunk when current one ends
+                audioSource.onended = () => {
+                    isPlaying = false;
+                    audioSource = null;
+
+                    // Continue playback if more audio is available
+                    if (audioBuffer.length >= bufferSize / 2) {
+                        startBufferedPlayback();
+                    } else {
+                        isBuffering = false;
+                    }
                 };
 
-                // Start playback immediately
-                source.start(0);
+                // Schedule playback for smooth transitions
+                const currentTime = audioContext.currentTime;
+                if (currentTime < nextPlayTime) {
+                    audioSource.start(nextPlayTime);
+                    nextPlayTime += buffer.duration;
+                } else {
+                    audioSource.start(currentTime);
+                    nextPlayTime = currentTime + buffer.duration;
+                }
+
             } catch (error) {
                 console.error('Error playing audio:', error);
                 isPlaying = false;
-                playNextInQueue(); // Try next chunk if current fails
+                isBuffering = false;
+                audioSource = null;
             }
         }
 
         function stopStreaming() {
             audioQueue = []; // Clear audio queue
+            audioBuffer = []; // Clear audio buffer
             isPlaying = false;
+            isBuffering = false;
+
+            // Stop current audio source
+            if (audioSource) {
+                try {
+                    audioSource.stop();
+                } catch (e) {
+                    // Ignore errors when stopping
+                }
+                audioSource = null;
+            }
+
             if (processor) {
                 processor.disconnect();
                 processor = null;
