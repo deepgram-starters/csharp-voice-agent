@@ -54,7 +54,7 @@ dotnet run Program.cs
 Test the application with:
 
 ```bash
-@TODO
+dotnet test
 ```
 
 ## Getting Help
