@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 
 namespace CSharpVoiceAgent
 {
@@ -18,6 +19,14 @@ namespace CSharpVoiceAgent
 
         static async Task Main(string[] args)
         {
+            // Simple Ctrl+C handler
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                Console.WriteLine("\nShutting down...");
+                e.Cancel = true;
+                Environment.Exit(0);
+            };
+
             try
             {
                 // Get API key from environment variable
@@ -62,7 +71,7 @@ namespace CSharpVoiceAgent
                         settingsConfiguration.Agent.Think.Provider.Model = "gpt-4o-mini";
                         settingsConfiguration.Audio.Output.SampleRate = 16000;
                         settingsConfiguration.Audio.Output.Container = "wav";
-                        settingsConfiguration.Audio.Input.SampleRate = 44100;
+                        settingsConfiguration.Audio.Input.SampleRate = 16000;
                         settingsConfiguration.Agent.Greeting = "Hello, how can I help you today?";
                         settingsConfiguration.Agent.Listen.Provider.Type = "deepgram";
                         settingsConfiguration.Agent.Listen.Provider.Model = "nova-3";
@@ -217,7 +226,7 @@ namespace CSharpVoiceAgent
         {
             if (webSocket == null || agentClient == null) return;
 
-            var buffer = new byte[64 * 1024]; // Increased from 4KB to 64KB
+            var buffer = new byte[64 * 1024];
             var messageBuffer = new List<byte>();
 
             try
@@ -249,11 +258,13 @@ namespace CSharpVoiceAgent
                                     switch (type.GetString())
                                     {
                                         case "audio":
+                                            Console.WriteLine("Received audio message from browser");
                                             if (data.TryGetProperty("data", out var audioData))
                                             {
                                                 var audioDataString = audioData.GetString();
                                                 if (!string.IsNullOrEmpty(audioDataString))
                                                 {
+                                                    Console.WriteLine($"Sending {audioDataString.Length} bytes to Deepgram agent");
                                                     var audioBytes = Convert.FromBase64String(audioDataString);
                                                     agentClient.SendBinary(audioBytes);
                                                 }
@@ -284,6 +295,18 @@ namespace CSharpVoiceAgent
             catch (Exception ex)
             {
                 Console.WriteLine($"WebSocket error: {ex.Message}");
+            }
+            finally
+            {
+                // Simple cleanup
+                if (webSocket?.State == WebSocketState.Open)
+                {
+                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+                }
+                if (agentClient != null)
+                {
+                    await agentClient.Stop();
+                }
             }
         }
     }
