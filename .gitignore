@@ -1,64 +1,21 @@
-# Add all the ignore files
+# .NET build output
+[Bb]in/
+[Oo]bj/
 
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Build outputs
-bin/
-obj/
-out/
-build/
-dist/
-
-# Dependencies
-packages/
-*.nupkg
-
-# IDE and editor files
+# IDE
 .vs/
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Logs
-*.log
-logs/
-log.txt
-
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Temporary folders
-tmp/
-temp/
-
-# C# specific
 *.user
 *.suo
-*.userosscache
-*.sln.docstates
-*.userprefs
-*.pidb
-*.booproj
-*.svd
-*.pdb
-*.mdb
-*.opendb
-*.VC.db
-*.VC.VC.opendb
+
+# Environment
+.env
+
+# Frontend
+frontend/node_modules/
+frontend/.vite/
+
+# Test results
+test-results/
+
+# macOS
+.DS_Store

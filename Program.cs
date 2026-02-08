@@ -1,339 +1,322 @@
-using Deepgram.Models.Authenticate.v1;
-using Deepgram.Models.Agent.v2.WebSocket;
-using System.Collections.Generic;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+/**
+ * C# Voice Agent Starter - Backend Server
+ *
+ * A WebSocket proxy server that transparently forwards messages between
+ * browser clients and Deepgram's Voice Agent API.
+ *
+ * Key Features:
+ * - WebSocket proxy: /api/voice-agent -> wss://agent.deepgram.com/v1/agent/converse
+ * - Bidirectional message forwarding (JSON + binary audio)
+ * - Metadata endpoint: GET /api/metadata
+ * - CORS enabled for frontend communication
+ * - Graceful shutdown with connection tracking
+ */
+
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
+using Tomlyn;
+using Tomlyn.Model;
+using HttpResults = Microsoft.AspNetCore.Http.Results;
 
-namespace CSharpVoiceAgent
+// ============================================================================
+// ENVIRONMENT LOADING
+// ============================================================================
+
+DotNetEnv.Env.Load();
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 8081;
+var host = Environment.GetEnvironmentVariable("HOST") ?? "0.0.0.0";
+var frontendPort = int.TryParse(Environment.GetEnvironmentVariable("FRONTEND_PORT"), out var fp) ? fp : 8080;
+
+const string DeepgramAgentUrl = "wss://agent.deepgram.com/v1/agent/converse";
+
+// ============================================================================
+// API KEY LOADING
+// ============================================================================
+
+static string LoadApiKey()
 {
-    class Program
+    var apiKey = Environment.GetEnvironmentVariable("DEEPGRAM_API_KEY");
+
+    if (string.IsNullOrEmpty(apiKey))
     {
-        private static WebSocket? webSocket;
+        Console.Error.WriteLine("\n❌ ERROR: Deepgram API key not found!\n");
+        Console.Error.WriteLine("Please set your API key using one of these methods:\n");
+        Console.Error.WriteLine("1. Create a .env file (recommended):");
+        Console.Error.WriteLine("   DEEPGRAM_API_KEY=your_api_key_here\n");
+        Console.Error.WriteLine("2. Environment variable:");
+        Console.Error.WriteLine("   export DEEPGRAM_API_KEY=your_api_key_here\n");
+        Console.Error.WriteLine("Get your API key at: https://console.deepgram.com\n");
+        Environment.Exit(1);
+    }
 
-        static async Task Main(string[] args)
+    return apiKey;
+}
+
+var apiKey = LoadApiKey();
+
+// ============================================================================
+// SETUP
+// ============================================================================
+
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://{host}:{port}");
+
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.WithOrigins(
+                $"http://localhost:{frontendPort}",
+                $"http://127.0.0.1:{frontendPort}")
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
+});
+
+var app = builder.Build();
+app.UseCors();
+app.UseWebSockets();
+
+// Track active connections for graceful shutdown
+var activeConnections = new ConcurrentDictionary<string, WebSocket>();
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Forwards messages from one WebSocket to another
+static async Task ForwardMessages(WebSocket source, WebSocket destination, string direction, CancellationToken ct)
+{
+    var buffer = new byte[8192];
+    var messageCount = 0;
+
+    try
+    {
+        while (source.State == WebSocketState.Open && destination.State == WebSocketState.Open)
         {
-            // Simple Ctrl+C handler
-            Console.CancelKeyPress += (sender, e) =>
+            var result = await source.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+
+            if (result.MessageType == WebSocketMessageType.Close)
             {
-                Console.WriteLine("\nShutting down...");
-                e.Cancel = true;
-                Environment.Exit(0);
-            };
-
-            try
-            {
-                // Get API key from environment variable
-                var apiKey = Environment.GetEnvironmentVariable("DEEPGRAM_API_KEY");
-                if (string.IsNullOrEmpty(apiKey))
+                // Propagate close to destination
+                if (destination.State == WebSocketState.Open)
                 {
-                    Console.WriteLine("Error: DEEPGRAM_API_KEY environment variable not set.");
-                    Console.WriteLine("Please set it with: export DEEPGRAM_API_KEY='YOUR_DEEPGRAM_API_KEY'");
-                    return;
+                    await destination.CloseAsync(
+                        result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                        result.CloseStatusDescription ?? "Connection closed",
+                        ct);
                 }
-
-                // Start web server
-                var builder = WebApplication.CreateBuilder(args);
-                var app = builder.Build();
-
-                // Enable WebSocket support
-                app.UseWebSockets();
-
-                // Serve static files
-                app.UseStaticFiles();
-
-                // WebSocket endpoint
-                app.Map("/ws", async context =>
-                {
-                    Console.WriteLine($"WebSocket request received from {context.Connection.RemoteIpAddress}");
-                    if (context.WebSockets.IsWebSocketRequest)
-                    {
-                        Console.WriteLine("Accepting WebSocket connection...");
-                        webSocket = await context.WebSockets.AcceptWebSocketAsync();
-                        Console.WriteLine("WebSocket connection established");
-
-                        // Create Deepgram WebSocket client for this connection
-                        DeepgramWsClientOptions options = new DeepgramWsClientOptions(null, null, true);
-                        var agentClient = Deepgram.ClientFactory.CreateAgentWebSocketClient(apiKey: apiKey, options: options);
-
-                        // Subscribe to all events
-                        await SubscribeToEvents(agentClient);
-
-                        // Connect to Deepgram Agent
-                        var settingsConfiguration = new SettingsSchema();
-                        settingsConfiguration.Agent.Think.Provider.Type = "open_ai";
-                        settingsConfiguration.Agent.Think.Provider.Model = "gpt-4o-mini";
-                        settingsConfiguration.Audio.Output.SampleRate = 16000;
-                        settingsConfiguration.Audio.Output.Container = "wav";
-                        settingsConfiguration.Audio.Input.SampleRate = 16000;
-                        settingsConfiguration.Agent.Greeting = "Hello, how can I help you today?";
-                        settingsConfiguration.Agent.Listen.Provider.Type = "deepgram";
-                        settingsConfiguration.Agent.Listen.Provider.Model = "nova-3";
-                        settingsConfiguration.Agent.Listen.Provider.Keyterms = new List<string> { "Deepgram" };
-
-                        bool bConnected = await agentClient.Connect(settingsConfiguration);
-                        if (!bConnected)
-                        {
-                            Console.WriteLine("Failed to connect to Deepgram WebSocket server.");
-                            return;
-                        }
-
-                        // Handle WebSocket communication
-                        await HandleWebSocketCommunication(agentClient);
-                    }
-                    else
-                    {
-                        Console.WriteLine("Non-WebSocket request received");
-                        context.Response.StatusCode = 400;
-                    }
-                });
-
-                // Default route serves the HTML page
-                app.MapGet("/", async context =>
-                {
-                    context.Response.ContentType = "text/html";
-                    await context.Response.SendFileAsync("static/index.html");
-                });
-
-                Console.WriteLine("Starting web server on http://localhost:3000");
-                Console.WriteLine("Open your browser and navigate to http://localhost:3000");
-                Console.WriteLine("Press Ctrl+C to stop the server");
-
-                try
-                {
-                    // Simple test methods that can be called manually
-                    if (args.Contains("test"))
-                    {
-                        await RunTests();
-                        return;
-                    }
-
-                    await app.RunAsync("http://localhost:3000");
-                }
-                catch (System.Net.Sockets.SocketException ex) when (ex.Message.Contains("Address already in use"))
-                {
-                    Console.WriteLine("Port 3000 is already in use. Please try a different port or stop the application using port 3000.");
-                    Console.WriteLine("You can also try: dotnet run --urls http://localhost:5000");
-                }
+                break;
             }
-            catch (Exception ex)
+
+            messageCount++;
+            var logInterval = direction == "client→deepgram" ? 100 : 10;
+            var isBinary = result.MessageType == WebSocketMessageType.Binary;
+            if (messageCount % logInterval == 0 || !isBinary)
             {
-                Console.WriteLine($"Exception: {ex.Message}");
+                Console.WriteLine($"  {(direction == "client→deepgram" ? "→" : "←")} {direction} #{messageCount} (binary: {isBinary}, size: {result.Count})");
             }
-        }
 
-        private static async Task SubscribeToEvents(dynamic agentClient)
-        {
-            if (agentClient == null) return;
-
-            await agentClient.Subscribe(new EventHandler<OpenResponse>((sender, e) =>
+            if (destination.State == WebSocketState.Open)
             {
-                Console.WriteLine($"----> {e.Type} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<AudioResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e.Type} received");
-                if (e.Stream != null && webSocket != null)
-                {
-                    // Send audio data to browser
-                    var audioData = e.Stream.ToArray();
-                    var message = new { type = "audio", data = Convert.ToBase64String(audioData) };
-                    var json = JsonSerializer.Serialize(message);
-                    var buffer = Encoding.UTF8.GetBytes(json);
-                    webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-                }
-            }));
-
-            await agentClient.Subscribe(new EventHandler<AgentAudioDoneResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<AgentStartedSpeakingResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<AgentThinkingResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<ConversationTextResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-                if (webSocket != null)
-                {
-                    var message = new { type = "text", data = e };
-                    var json = JsonSerializer.Serialize(message);
-                    var buffer = Encoding.UTF8.GetBytes(json);
-                    webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-                }
-            }));
-
-            await agentClient.Subscribe(new EventHandler<FunctionCallRequestResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<UserStartedSpeakingResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<WelcomeResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<CloseResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<SettingsAppliedResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<PromptUpdatedResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received.");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<UnhandledResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received");
-            }));
-
-            await agentClient.Subscribe(new EventHandler<ErrorResponse>((sender, e) =>
-            {
-                Console.WriteLine($"----> {e} received. Error: {e.Message}");
-            }));
-        }
-
-        private static async Task HandleWebSocketCommunication(dynamic agentClient)
-        {
-            if (webSocket == null || agentClient == null) return;
-
-            var buffer = new byte[64 * 1024];
-            var messageBuffer = new List<byte>();
-
-            try
-            {
-                while (webSocket.State == WebSocketState.Open)
-                {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-
-                    if (result.MessageType == WebSocketMessageType.Text)
-                    {
-                        // Add received data to message buffer
-                        for (int i = 0; i < result.Count; i++)
-                        {
-                            messageBuffer.Add(buffer[i]);
-                        }
-
-                        // If this is the end of the message, process it
-                        if (result.EndOfMessage)
-                        {
-                            var message = Encoding.UTF8.GetString(messageBuffer.ToArray());
-                            messageBuffer.Clear();
-
-                            try
-                            {
-                                var data = JsonSerializer.Deserialize<JsonElement>(message);
-
-                                if (data.TryGetProperty("type", out var type))
-                                {
-                                    switch (type.GetString())
-                                    {
-                                        case "audio":
-                                            Console.WriteLine("Received audio message from browser");
-                                            if (data.TryGetProperty("data", out var audioData))
-                                            {
-                                                var audioDataString = audioData.GetString();
-                                                if (!string.IsNullOrEmpty(audioDataString))
-                                                {
-                                                    Console.WriteLine($"Sending {audioDataString.Length} bytes to Deepgram agent");
-                                                    var audioBytes = Convert.FromBase64String(audioDataString);
-                                                    agentClient.SendBinary(audioBytes);
-                                                }
-                                            }
-                                            break;
-                                        case "start":
-                                            // Start microphone
-                                            break;
-                                        case "stop":
-                                            // Stop microphone
-                                            break;
-                                    }
-                                }
-                            }
-                            catch (JsonException ex)
-                            {
-                                Console.WriteLine($"JSON parsing error: {ex.Message}");
-                                Console.WriteLine($"Message length: {message.Length}");
-                            }
-                        }
-                    }
-                    else if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
-                    }
-                }
+                await destination.SendAsync(
+                    new ArraySegment<byte>(buffer, 0, result.Count),
+                    result.MessageType,
+                    result.EndOfMessage,
+                    ct);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"WebSocket error: {ex.Message}");
-            }
-            finally
-            {
-                // Simple cleanup
-                if (webSocket?.State == WebSocketState.Open)
-                {
-                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
-                }
-                if (agentClient != null)
-                {
-                    await agentClient.Stop();
-                }
-            }
-        }
-
-        private static async Task RunTests()
-        {
-            Console.WriteLine("Running tests...");
-
-            // Test 1: Server startup
-            Console.WriteLine("✓ Server test passed");
-
-            // Test 2: WebSocket functionality
-            Console.WriteLine("✓ WebSocket test passed");
-
-            // Test 3: Agent creation
-            Console.WriteLine("✓ Agent creation test passed");
-
-            // Test 4: Audio handling
-            Console.WriteLine("✓ Audio handling test passed");
-
-            Console.WriteLine("All tests passed!");
         }
     }
+    catch (WebSocketException ex)
+    {
+        Console.Error.WriteLine($"  WebSocket error in {direction}: {ex.Message}");
+    }
+    catch (OperationCanceledException)
+    {
+        // Shutdown requested
+    }
 }
+
+/// Handles a single WebSocket proxy session between client and Deepgram Agent
+async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToken appCt)
+{
+    var connectionId = Guid.NewGuid().ToString("N")[..8];
+    activeConnections[connectionId] = clientWs;
+    Console.WriteLine($"[{connectionId}] Client connected to /api/voice-agent");
+
+    using var deepgramWs = new ClientWebSocket();
+    deepgramWs.Options.SetRequestHeader("Authorization", $"Token {apiKey}");
+
+    try
+    {
+        Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API...");
+        await deepgramWs.ConnectAsync(new Uri(DeepgramAgentUrl), appCt);
+        Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(appCt);
+
+        var clientToDeepgram = ForwardMessages(clientWs, deepgramWs, "client→deepgram", cts.Token);
+        var deepgramToClient = ForwardMessages(deepgramWs, clientWs, "deepgram→client", cts.Token);
+
+        // Wait for either direction to complete
+        await Task.WhenAny(clientToDeepgram, deepgramToClient);
+        cts.Cancel();
+
+        // Allow the other task to finish
+        try { await Task.WhenAll(clientToDeepgram, deepgramToClient); }
+        catch (OperationCanceledException) { }
+    }
+    catch (WebSocketException ex)
+    {
+        Console.Error.WriteLine($"[{connectionId}] Deepgram connection error: {ex.Message}");
+        if (clientWs.State == WebSocketState.Open)
+        {
+            await clientWs.CloseAsync(
+                WebSocketCloseStatus.InternalServerError,
+                "Deepgram connection error",
+                CancellationToken.None);
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // App shutdown
+    }
+    finally
+    {
+        // Close connections if still open
+        if (clientWs.State == WebSocketState.Open)
+        {
+            try
+            {
+                await clientWs.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "Connection ended",
+                    CancellationToken.None);
+            }
+            catch { }
+        }
+        if (deepgramWs.State == WebSocketState.Open)
+        {
+            try
+            {
+                await deepgramWs.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "Connection ended",
+                    CancellationToken.None);
+            }
+            catch { }
+        }
+
+        activeConnections.TryRemove(connectionId, out _);
+        Console.WriteLine($"[{connectionId}] Connection closed ({activeConnections.Count} active)");
+    }
+}
+
+// ============================================================================
+// WEBSOCKET ENDPOINT
+// ============================================================================
+
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path == "/api/voice-agent" && context.WebSockets.IsWebSocketRequest)
+    {
+        var clientWs = await context.WebSockets.AcceptWebSocketAsync();
+        await HandleAgentStream(clientWs, apiKey, context.RequestAborted);
+    }
+    else
+    {
+        await next(context);
+    }
+});
+
+// ============================================================================
+// API ROUTES
+// ============================================================================
+
+/// GET /api/metadata
+///
+/// Returns metadata about this starter application from deepgram.toml
+app.MapGet("/api/metadata", () =>
+{
+    try
+    {
+        var tomlPath = Path.Combine(Directory.GetCurrentDirectory(), "deepgram.toml");
+        var tomlContent = File.ReadAllText(tomlPath);
+        var tomlModel = Toml.ToModel(tomlContent);
+
+        if (!tomlModel.ContainsKey("meta") || tomlModel["meta"] is not TomlTable metaTable)
+        {
+            return HttpResults.Json(new Dictionary<string, string>
+            {
+                ["error"] = "INTERNAL_SERVER_ERROR",
+                ["message"] = "Missing [meta] section in deepgram.toml",
+            }, statusCode: 500);
+        }
+
+        var meta = new Dictionary<string, object?>();
+        foreach (var kvp in metaTable)
+        {
+            meta[kvp.Key] = kvp.Value;
+        }
+
+        return HttpResults.Json(meta);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Error reading metadata: {ex}");
+        return HttpResults.Json(new Dictionary<string, string>
+        {
+            ["error"] = "INTERNAL_SERVER_ERROR",
+            ["message"] = "Failed to read metadata from deepgram.toml",
+        }, statusCode: 500);
+    }
+});
+
+// ============================================================================
+// GRACEFUL SHUTDOWN
+// ============================================================================
+
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+{
+    Console.WriteLine($"\nShutting down... Closing {activeConnections.Count} active connection(s)...");
+    foreach (var kvp in activeConnections)
+    {
+        try
+        {
+            if (kvp.Value.State == WebSocketState.Open)
+            {
+                kvp.Value.CloseAsync(
+                    WebSocketCloseStatus.EndpointUnavailable,
+                    "Server shutting down",
+                    CancellationToken.None).Wait(TimeSpan.FromSeconds(5));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error closing connection {kvp.Key}: {ex.Message}");
+        }
+    }
+    Console.WriteLine("All connections closed.");
+});
+
+// ============================================================================
+// SERVER START
+// ============================================================================
+
+Console.WriteLine();
+Console.WriteLine(new string('=', 70));
+Console.WriteLine($"🚀 Backend API Server running at http://localhost:{port}");
+Console.WriteLine($"📡 CORS enabled for http://localhost:{frontendPort}");
+Console.WriteLine($"📡 WebSocket endpoint: ws://localhost:{port}/api/voice-agent");
+Console.WriteLine($"\n💡 Frontend should be running on http://localhost:{frontendPort}");
+Console.WriteLine(new string('=', 70));
+Console.WriteLine();
+
+app.Run();
