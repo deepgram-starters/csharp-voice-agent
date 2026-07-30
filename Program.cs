@@ -17,6 +17,11 @@ using System.Collections.Concurrent;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Deepgram;
+using Deepgram.Models.Agent.v2.WebSocket;
+using Deepgram.Models.Authenticate.v1;
 using Microsoft.IdentityModel.Tokens;
 using Tomlyn;
 using Tomlyn.Model;
@@ -35,8 +40,6 @@ DotNetEnv.Env.Load();
 var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 8081;
 var host = Environment.GetEnvironmentVariable("HOST") ?? "0.0.0.0";
 var frontendPort = int.TryParse(Environment.GetEnvironmentVariable("FRONTEND_PORT"), out var fp) ? fp : 8080;
-
-const string DeepgramAgentUrl = "wss://agent.deepgram.com/v1/agent/converse";
 
 // ============================================================================
 // SESSION AUTH - JWT tokens with rate limiting for production security
@@ -117,6 +120,9 @@ static string LoadApiKey()
 
 var apiKey = LoadApiKey();
 
+// Initialize the Deepgram library once at startup.
+Library.Initialize();
+
 // ============================================================================
 // SETUP
 // ============================================================================
@@ -159,122 +165,169 @@ app.MapGet("/api/session", () =>
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Forwards messages from one WebSocket to another
-static async Task ForwardMessages(WebSocket source, WebSocket destination, string direction, CancellationToken ct)
+/// Extracts the "type" discriminator from a browser control message, or null if the
+/// payload is not JSON with a string "type" field.
+static string? GetMessageType(string json)
 {
-    var buffer = new byte[8192];
-    var messageCount = 0;
-
     try
     {
-        while (source.State == WebSocketState.Open && destination.State == WebSocketState.Open)
-        {
-            var result = await source.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                // Propagate close to destination
-                if (destination.State == WebSocketState.Open)
-                {
-                    await destination.CloseAsync(
-                        result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
-                        result.CloseStatusDescription ?? "Connection closed",
-                        ct);
-                }
-                break;
-            }
-
-            messageCount++;
-            var logInterval = direction == "client→deepgram" ? 100 : 10;
-            var isBinary = result.MessageType == WebSocketMessageType.Binary;
-            if (messageCount % logInterval == 0 || !isBinary)
-            {
-                Console.WriteLine($"  {(direction == "client→deepgram" ? "→" : "←")} {direction} #{messageCount} (binary: {isBinary}, size: {result.Count})");
-            }
-
-            if (destination.State == WebSocketState.Open)
-            {
-                await destination.SendAsync(
-                    new ArraySegment<byte>(buffer, 0, result.Count),
-                    result.MessageType,
-                    result.EndOfMessage,
-                    ct);
-            }
-        }
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
     }
-    catch (WebSocketException ex)
+    catch (JsonException)
     {
-        Console.Error.WriteLine($"  WebSocket error in {direction}: {ex.Message}");
-    }
-    catch (OperationCanceledException)
-    {
-        // Shutdown requested
+        return null;
     }
 }
 
-/// Handles a single WebSocket proxy session between client and Deepgram Agent
+/// Handles a single session between a browser client and the Deepgram Voice Agent.
+///
+/// The browser-facing WebSocket is unchanged: the client still drives the agent
+/// protocol (waits for "Welcome", sends its "Settings", then "UpdateSpeak",
+/// "UpdatePrompt", "InjectUserMessage" and binary audio) and receives the agent's
+/// native JSON events plus binary audio. Only the Deepgram-facing side now uses the
+/// Deepgram .NET SDK (ClientFactory.CreateAgentWebSocketClient) instead of a raw
+/// ClientWebSocket.
+///
+/// One adaptation is required: the SDK couples establishing the socket with sending
+/// the Settings message (agentClient.Connect(SettingsSchema)), whereas the raw proxy
+/// was fully transparent. To preserve the frontend's exact handshake (it waits for a
+/// "Welcome" before sending "Settings"), the server synthesizes the "Welcome" locally,
+/// then translates the client's first "Settings" message into the SDK's typed Connect
+/// call. The real "Welcome" surfaced by the SDK is intentionally not re-forwarded.
+/// Subsequent control messages are forwarded verbatim over the SDK connection.
 async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToken appCt)
 {
     var connectionId = Guid.NewGuid().ToString("N")[..8];
     activeConnections[connectionId] = clientWs;
     Console.WriteLine($"[{connectionId}] Client connected to /api/voice-agent");
 
-    using var deepgramWs = new ClientWebSocket();
-    deepgramWs.Options.SetRequestHeader("Authorization", $"Token {apiKey}");
+    // Outbound queue → browser (agent JSON events + binary audio). SDK event handlers
+    // fire from the receive loop and may overlap, so all sends are funneled through one
+    // writer.
+    var outbound = System.Threading.Channels.Channel.CreateUnbounded<(byte[] payload, WebSocketMessageType type)>();
+    void SendText(string s) => outbound.Writer.TryWrite((Encoding.UTF8.GetBytes(s), WebSocketMessageType.Text));
 
+    // Deepgram Voice Agent client (replaces the raw ClientWebSocket). KeepAlive keeps the
+    // upstream connection open during silence.
+    var options = new DeepgramWsClientOptions(keepAlive: true);
+    var agentClient = ClientFactory.CreateAgentWebSocketClient(apiKey, options);
+
+    // Forward every agent event to the browser as the raw JSON / audio the frontend
+    // expects. The SDK response records serialize back to the agent wire format via
+    // ToString(). WelcomeResponse is deliberately NOT forwarded (see note above).
+    await agentClient.Subscribe(new EventHandler<AudioResponse>((_, e) =>
+    {
+        if (e.Stream != null)
+            outbound.Writer.TryWrite((e.Stream.ToArray(), WebSocketMessageType.Binary));
+    }));
+    await agentClient.Subscribe(new EventHandler<ConversationTextResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<UserStartedSpeakingResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<AgentThinkingResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<AgentStartedSpeakingResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<AgentAudioDoneResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<FunctionCallRequestResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<SettingsAppliedResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<PromptUpdatedResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<ErrorResponse>((_, e) => SendText(e.ToString())));
+
+    // Pump queued messages to the browser one at a time.
+    var pump = Task.Run(async () =>
+    {
+        try
+        {
+            await foreach (var (payload, type) in outbound.Reader.ReadAllAsync(appCt))
+            {
+                if (clientWs.State != WebSocketState.Open) break;
+                await clientWs.SendAsync(payload, type, true, appCt);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
+    });
+
+    var connected = false;
     try
     {
-        Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API...");
-        await deepgramWs.ConnectAsync(new Uri(DeepgramAgentUrl), appCt);
-        Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
+        // Unblock the frontend's handshake: it waits for a Welcome before sending Settings.
+        SendText("{\"type\":\"Welcome\"}");
 
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(appCt);
-
-        var clientToDeepgram = ForwardMessages(clientWs, deepgramWs, "client→deepgram", cts.Token);
-        var deepgramToClient = ForwardMessages(deepgramWs, clientWs, "deepgram→client", cts.Token);
-
-        // Wait for either direction to complete
-        await Task.WhenAny(clientToDeepgram, deepgramToClient);
-        cts.Cancel();
-
-        // Allow the other task to finish
-        try { await Task.WhenAll(clientToDeepgram, deepgramToClient); }
-        catch (OperationCanceledException) { }
-    }
-    catch (WebSocketException ex)
-    {
-        Console.Error.WriteLine($"[{connectionId}] Deepgram connection error: {ex.Message}");
-        if (clientWs.State == WebSocketState.Open)
+        var messageBuffer = new MemoryStream();
+        var buffer = new byte[8192];
+        while (clientWs.State == WebSocketState.Open)
         {
-            await clientWs.CloseAsync(
-                WebSocketCloseStatus.InternalServerError,
-                "Deepgram connection error",
-                CancellationToken.None);
+            var result = await clientWs.ReceiveAsync(new ArraySegment<byte>(buffer), appCt);
+            if (result.MessageType == WebSocketMessageType.Close) break;
+
+            messageBuffer.Write(buffer, 0, result.Count);
+            if (!result.EndOfMessage) continue;
+
+            var payload = messageBuffer.ToArray();
+            messageBuffer.SetLength(0);
+
+            if (result.MessageType == WebSocketMessageType.Binary)
+            {
+                // Microphone audio → forward to the agent once configured.
+                if (connected && payload.Length > 0)
+                    await agentClient.SendBinaryImmediately(payload);
+                continue;
+            }
+
+            // Text control message from the browser.
+            var text = Encoding.UTF8.GetString(payload);
+            var type = GetMessageType(text);
+
+            if (!connected)
+            {
+                // The first Settings message establishes the upstream connection.
+                if (type == "Settings")
+                {
+                    var settings = JsonSerializer.Deserialize<SettingsSchema>(text);
+                    if (settings == null)
+                    {
+                        Console.Error.WriteLine($"[{connectionId}] Could not parse Settings message");
+                        break;
+                    }
+
+                    Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API...");
+                    connected = await agentClient.Connect(settings);
+                    if (!connected)
+                    {
+                        Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent");
+                        break;
+                    }
+                    Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
+                }
+                // Ignore anything sent before Settings.
+                continue;
+            }
+
+            // Forward post-connect control messages (UpdateSpeak, UpdatePrompt,
+            // InjectUserMessage, KeepAlive, ...) verbatim over the SDK connection.
+            await agentClient.SendMessageImmediately(Encoding.UTF8.GetBytes(text));
         }
     }
     catch (OperationCanceledException)
     {
-        // App shutdown
+        // App shutdown or client disconnect
+    }
+    catch (WebSocketException ex)
+    {
+        Console.Error.WriteLine($"[{connectionId}] WebSocket error: {ex.Message}");
     }
     finally
     {
-        // Close connections if still open
+        try { await agentClient.Stop(); } catch { }
+        outbound.Writer.TryComplete();
+        try { await pump; } catch { }
+
         if (clientWs.State == WebSocketState.Open)
         {
             try
             {
                 await clientWs.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure,
-                    "Connection ended",
-                    CancellationToken.None);
-            }
-            catch { }
-        }
-        if (deepgramWs.State == WebSocketState.Open)
-        {
-            try
-            {
-                await deepgramWs.CloseAsync(
                     WebSocketCloseStatus.NormalClosure,
                     "Connection ended",
                     CancellationToken.None);
