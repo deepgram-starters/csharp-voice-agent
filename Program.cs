@@ -1,12 +1,19 @@
 /**
  * C# Voice Agent Starter - Backend Server
  *
- * A WebSocket proxy server that transparently forwards messages between
- * browser clients and Deepgram's Voice Agent API.
+ * A WebSocket bridge between browser clients and Deepgram's Voice Agent API,
+ * built on the Deepgram .NET SDK's Agent WebSocket client
+ * (ClientFactory.CreateAgentWebSocketClient) rather than a raw proxy.
+ *
+ * The browser-facing side is unchanged: the client still drives the agent
+ * protocol. Because the SDK couples opening the socket with sending Settings,
+ * the server synthesizes the "Welcome" locally, translates the client's first
+ * "Settings" message into the SDK's typed Connect call, and then forwards
+ * subsequent control messages and agent events. See HandleAgentStream for the
+ * details of that handshake adaptation.
  *
  * Key Features:
- * - WebSocket proxy: /api/voice-agent -> wss://agent.deepgram.com/v1/agent/converse
- * - Bidirectional message forwarding (JSON + binary audio)
+ * - WebSocket endpoint: /api/voice-agent (backed by the SDK Agent client)
  * - JWT session auth with rate limiting (production only)
  * - Metadata endpoint: GET /api/metadata
  * - CORS enabled for frontend communication
@@ -284,21 +291,39 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
                 // The first Settings message establishes the upstream connection.
                 if (type == "Settings")
                 {
-                    var settings = JsonSerializer.Deserialize<SettingsSchema>(text);
-                    if (settings == null)
+                    // Parsing and connecting can throw (a malformed Settings
+                    // payload → JsonException; Connect → SDK/transport
+                    // exceptions). The outer try only catches
+                    // OperationCanceledException/WebSocketException, so guard
+                    // here to keep the intended logging + clean close.
+                    try
                     {
-                        Console.Error.WriteLine($"[{connectionId}] Could not parse Settings message");
-                        break;
-                    }
+                        var settings = JsonSerializer.Deserialize<SettingsSchema>(text);
+                        if (settings == null)
+                        {
+                            Console.Error.WriteLine($"[{connectionId}] Could not parse Settings message");
+                            break;
+                        }
 
-                    Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API...");
-                    connected = await agentClient.Connect(settings);
-                    if (!connected)
+                        Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API...");
+                        connected = await agentClient.Connect(settings);
+                        if (!connected)
+                        {
+                            Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent");
+                            break;
+                        }
+                        Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
+                    }
+                    catch (JsonException ex)
                     {
-                        Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent");
+                        Console.Error.WriteLine($"[{connectionId}] Could not parse Settings message: {ex.Message}");
                         break;
                     }
-                    Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent: {ex.Message}");
+                        break;
+                    }
                 }
                 // Ignore anything sent before Settings.
                 continue;
