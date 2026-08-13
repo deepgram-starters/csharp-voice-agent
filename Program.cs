@@ -215,30 +215,39 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
     var outbound = System.Threading.Channels.Channel.CreateUnbounded<(byte[] payload, WebSocketMessageType type)>();
     void SendText(string s) => outbound.Writer.TryWrite((Encoding.UTF8.GetBytes(s), WebSocketMessageType.Text));
 
+    // Serialize an agent event to the wire JSON the frontend expects. This mirrors the
+    // SDK response records' own serialization (Web defaults + explicit [JsonPropertyName]
+    // fields and PascalCase enum "type" discriminators) but deliberately does NOT run the
+    // SDK ToString()'s trailing Regex.Unescape. That unescape turns any reply containing a
+    // quote or newline into invalid JSON, so the browser's JSON.parse throws and the chat
+    // message is lost. Serializing directly keeps quotes/newlines properly escaped.
+    var agentJsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
+    void SendJson<T>(T e) => SendText(JsonSerializer.Serialize(e, agentJsonOptions));
+
     // Deepgram Voice Agent client (replaces the raw ClientWebSocket). KeepAlive keeps the
     // upstream connection open during silence.
     var options = new DeepgramWsClientOptions(keepAlive: true);
     var agentClient = ClientFactory.CreateAgentWebSocketClient(apiKey, options);
 
     // Forward every agent event to the browser as the raw JSON / audio the frontend
-    // expects. The SDK response records serialize back to the agent wire format via
-    // ToString(). WelcomeResponse is deliberately NOT forwarded (see note above).
+    // expects. The SDK response records are serialized to the agent wire format via
+    // SendJson (see above). WelcomeResponse is deliberately NOT forwarded (see note above).
     await agentClient.Subscribe(new EventHandler<AudioResponse>((_, e) =>
     {
         if (e.Stream != null)
             outbound.Writer.TryWrite((e.Stream.ToArray(), WebSocketMessageType.Binary));
     }));
-    await agentClient.Subscribe(new EventHandler<ConversationTextResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<UserStartedSpeakingResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<AgentThinkingResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<AgentStartedSpeakingResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<AgentAudioDoneResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<FunctionCallRequestResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<SettingsAppliedResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<PromptUpdatedResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((_, e) => SendText(e.ToString())));
-    await agentClient.Subscribe(new EventHandler<ErrorResponse>((_, e) => SendText(e.ToString())));
+    await agentClient.Subscribe(new EventHandler<ConversationTextResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<UserStartedSpeakingResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<AgentThinkingResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<AgentStartedSpeakingResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<AgentAudioDoneResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<FunctionCallRequestResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<SettingsAppliedResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<PromptUpdatedResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<ErrorResponse>((_, e) => SendJson(e)));
 
     // Pump queued messages to the browser one at a time.
     var pump = Task.Run(async () =>
