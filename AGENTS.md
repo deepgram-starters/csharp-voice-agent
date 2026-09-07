@@ -14,7 +14,7 @@ C# (.NET) demo app for Deepgram Voice Agent.
 
 | File | Purpose |
 |------|---------|
-| `Program.cs` | Main backend — API endpoints and WebSocket proxy |
+| `Program.cs` | Main backend — API endpoints and SDK-backed WebSocket bridge |
 | `deepgram.toml` | Metadata, lifecycle commands, tags |
 | `Makefile` | Standardized build/run targets |
 | `sample.env` | Environment variable template |
@@ -85,7 +85,7 @@ Frontend: `cd frontend && corepack pnpm install`
 ## Customization Guide
 
 ### How the Agent Works
-The backend is a **pure WebSocket proxy** — it forwards messages between the browser and Deepgram's Agent API. All agent configuration happens via JSON messages from the frontend.
+The backend is an SDK-backed WebSocket bridge. It synthesizes the browser's initial `Welcome` message, converts the browser's first `Settings` message into the SDK's typed connection call, then forwards control messages, Agent events, and audio. Provider extension fields such as `version` and `language_hint` are preserved through the SDK's provider extension data; unknown Agent JSON events are forwarded unchanged.
 
 ### Agent Settings (sent from frontend)
 The frontend sends a `Settings` message after connecting:

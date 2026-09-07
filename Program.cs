@@ -208,6 +208,7 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
     var connectionId = Guid.NewGuid().ToString("N")[..8];
     activeConnections[connectionId] = clientWs;
     Console.WriteLine($"[{connectionId}] Client connected to /api/voice-agent");
+    using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(appCt);
 
     // Outbound queue → browser (agent JSON events + binary audio). SDK event handlers
     // fire from the receive loop and may overlap, so all sends are funneled through one
@@ -248,16 +249,22 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
     await agentClient.Subscribe(new EventHandler<SpeakUpdatedResponse>((_, e) => SendJson(e)));
     await agentClient.Subscribe(new EventHandler<InjectionRefusedResponse>((_, e) => SendJson(e)));
     await agentClient.Subscribe(new EventHandler<ErrorResponse>((_, e) => SendJson(e)));
+    await agentClient.Subscribe(new EventHandler<UnhandledResponse>((_, e) =>
+    {
+        if (!string.IsNullOrEmpty(e.Raw))
+            SendText(e.Raw);
+    }));
+    await agentClient.Subscribe(new EventHandler<CloseResponse>((_, _) => sessionCts.Cancel()));
 
     // Pump queued messages to the browser one at a time.
     var pump = Task.Run(async () =>
     {
         try
         {
-            await foreach (var (payload, type) in outbound.Reader.ReadAllAsync(appCt))
+            await foreach (var (payload, type) in outbound.Reader.ReadAllAsync(sessionCts.Token))
             {
                 if (clientWs.State != WebSocketState.Open) break;
-                await clientWs.SendAsync(payload, type, true, appCt);
+                await clientWs.SendAsync(payload, type, true, sessionCts.Token);
             }
         }
         catch (OperationCanceledException) { }
@@ -274,7 +281,7 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
         var buffer = new byte[8192];
         while (clientWs.State == WebSocketState.Open)
         {
-            var result = await clientWs.ReceiveAsync(new ArraySegment<byte>(buffer), appCt);
+            var result = await clientWs.ReceiveAsync(new ArraySegment<byte>(buffer), sessionCts.Token);
             if (result.MessageType == WebSocketMessageType.Close) break;
 
             messageBuffer.Write(buffer, 0, result.Count);
@@ -345,7 +352,7 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
     }
     catch (OperationCanceledException)
     {
-        // App shutdown or client disconnect
+        // App shutdown, client disconnect, or an upstream Agent close.
     }
     catch (WebSocketException ex)
     {
