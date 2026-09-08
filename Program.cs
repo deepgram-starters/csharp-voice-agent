@@ -127,8 +127,8 @@ static string LoadApiKey()
 
 var apiKey = LoadApiKey();
 
-// Initialize the Deepgram library once at startup.
-Library.Initialize();
+// Disable SDK file logging so session settings and prompts never reach disk.
+Library.Initialize(Deepgram.Logger.LogLevel.Information, filename: null);
 
 // ============================================================================
 // SETUP
@@ -209,6 +209,8 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
     activeConnections[connectionId] = clientWs;
     Console.WriteLine($"[{connectionId}] Client connected to /api/voice-agent");
     using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(appCt);
+    var closeStatus = WebSocketCloseStatus.NormalClosure;
+    var closeDescription = "Connection ended";
 
     // Outbound queue → browser (agent JSON events + binary audio). SDK event handlers
     // fire from the receive loop and may overlap, so all sends are funneled through one
@@ -254,7 +256,10 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
         if (!string.IsNullOrEmpty(e.Raw))
             SendText(e.Raw);
     }));
-    await agentClient.Subscribe(new EventHandler<CloseResponse>((_, _) => sessionCts.Cancel()));
+    await agentClient.Subscribe(new EventHandler<CloseResponse>((_, _) =>
+    {
+        try { sessionCts.Cancel(); } catch (ObjectDisposedException) { }
+    }));
 
     // Pump queued messages to the browser one at a time.
     var pump = Task.Run(async () =>
@@ -326,6 +331,9 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
                         if (!connected)
                         {
                             Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent");
+                            SendText("{\"type\":\"Error\",\"description\":\"Failed to connect to Deepgram Agent\",\"code\":\"CONNECTION_FAILED\"}");
+                            closeStatus = WebSocketCloseStatus.InternalServerError;
+                            closeDescription = "Failed to connect to Deepgram Agent";
                             break;
                         }
                         Console.WriteLine($"[{connectionId}] ✓ Connected to Deepgram Agent API");
@@ -338,6 +346,9 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
                     catch (Exception ex)
                     {
                         Console.Error.WriteLine($"[{connectionId}] Failed to connect to Deepgram Agent: {ex.Message}");
+                        SendText("{\"type\":\"Error\",\"description\":\"Failed to connect to Deepgram Agent\",\"code\":\"CONNECTION_FAILED\"}");
+                        closeStatus = WebSocketCloseStatus.InternalServerError;
+                        closeDescription = "Failed to connect to Deepgram Agent";
                         break;
                     }
                 }
@@ -369,8 +380,8 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
             try
             {
                 await clientWs.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure,
-                    "Connection ended",
+                    closeStatus,
+                    closeDescription,
                     CancellationToken.None);
             }
             catch { }
