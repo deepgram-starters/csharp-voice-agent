@@ -3,7 +3,7 @@
 
 PNPM := corepack pnpm
 
-.PHONY: help check check-prereqs install init install-backend install-frontend start-backend start-frontend start test update clean status
+.PHONY: help check check-prereqs install init install-backend install-frontend start-backend start-frontend start test test-unit update clean status
 
 # Default target: show help
 help:
@@ -20,7 +20,8 @@ help:
 	@echo "  make start             Start application (backend + frontend)"
 	@echo "  make start-backend     Start backend only (port 8081)"
 	@echo "  make start-frontend    Start frontend only (port 8080)"
-	@echo "  make test              Run contract conformance tests"
+	@echo "  make test              Run unit and contract conformance tests"
+	@echo "  make test-unit         Run offline unit tests"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make update            Update submodules to latest commits"
@@ -109,7 +110,7 @@ start:
 	@$(MAKE) start-backend & $(MAKE) start-frontend & wait
 
 # Run contract conformance tests
-test:
+test: test-unit
 	@if [ ! -f ".env" ]; then \
 		echo "❌ Error: .env file not found. Copy sample.env to .env and add your DEEPGRAM_API_KEY"; \
 		exit 1; \
@@ -120,6 +121,10 @@ test:
 	fi
 	@echo "==> Running contract conformance tests..."
 	@bash contracts/tests/run-voice-agent-app.sh
+
+# Run offline regression tests.
+test-unit:
+	dotnet test tests/csharp-voice-agent.Tests.csproj
 
 # Update submodules to latest commits
 update:
