@@ -85,6 +85,43 @@ public class SettingsSerializationTests
     }
 
     [Fact]
+    public void SettingsWithSpeakProviderArrayAreAccepted()
+    {
+        Assert.True(AgentBridgeProtocol.TryParseInitialSettings(ValidSettingsWithSpeakArray, out var settings));
+        Assert.NotNull(settings);
+        Assert.Single(settings.Agent.Speak.SpeakProviders!);
+    }
+
+    public static IEnumerable<object[]> MalformedSpeakProviderArrays()
+    {
+        string[][] arrays =
+        [
+            ["empty", "[]"],
+            ["not an array", "{}"],
+            ["non-object entry", "[\"deepgram\"]"],
+            ["entry without provider", "[{}]"],
+            ["entry without provider type", "[{\"provider\":{\"model\":\"aura-2-thalia-en\"}}]"],
+            ["entry without provider model", "[{\"provider\":{\"type\":\"deepgram\"}}]"],
+            ["entry with blank provider model", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\" \"}}]"],
+            ["mixed valid and invalid entries", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\"aura-2-thalia-en\"}},{}]"],
+        ];
+
+        foreach (var array in arrays)
+        {
+            var settings = JsonNode.Parse(ValidSettings)!.AsObject();
+            settings["agent"]!.AsObject()["speak"] = JsonNode.Parse($$"""{ "speak": {{array[1]}} }""");
+            yield return [array[0], settings.ToJsonString()];
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(MalformedSpeakProviderArrays))]
+    public void SettingsWithMalformedSpeakProviderArrayReturnInvalidSettings(string form, string message)
+    {
+        Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), form);
+    }
+
+    [Fact]
     public void SdkLoggingIsDisabled()
     {
         Assert.Equal(Deepgram.Logger.LogLevel.Disable, AgentBridgeProtocol.SdkLogLevel);
@@ -198,6 +235,25 @@ public class SettingsSerializationTests
           "agent": {
             "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
             "speak": { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } },
+            "think": { "provider": { "type": "open_ai", "model": "gpt-4o-mini" } }
+          }
+        }
+        """;
+
+    private const string ValidSettingsWithSpeakArray = """
+        {
+          "type": "Settings",
+          "audio": {
+            "input": { "encoding": "linear16", "sample_rate": 16000 },
+            "output": { "encoding": "linear16", "sample_rate": 16000 }
+          },
+          "agent": {
+            "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
+            "speak": {
+              "speak": [
+                { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } }
+              ]
+            },
             "think": { "provider": { "type": "open_ai", "model": "gpt-4o-mini" } }
           }
         }

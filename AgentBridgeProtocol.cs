@@ -56,7 +56,7 @@ internal static class AgentBridgeProtocol
                 !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("input")) ||
                 !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("output")) ||
                 !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("listen")) ||
-                !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("speak")) ||
+                !HasRequiredSpeakFields(root.GetProperty("agent").GetProperty("speak")) ||
                 !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("think")))
             {
                 return false;
@@ -91,7 +91,9 @@ internal static class AgentBridgeProtocol
 
     private static bool HasObjectProperty(JsonElement element, string name)
     {
-        return element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Object;
+        return element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(name, out var property) &&
+            property.ValueKind == JsonValueKind.Object;
     }
 
     private static bool HasRequiredAudioFields(JsonElement audio)
@@ -104,6 +106,31 @@ internal static class AgentBridgeProtocol
         return HasObjectProperty(agent, "provider") &&
             HasNonEmptyStringProperty(agent.GetProperty("provider"), "type") &&
             HasNonEmptyStringProperty(agent.GetProperty("provider"), "model");
+    }
+
+    private static bool HasRequiredSpeakFields(JsonElement speak)
+    {
+        if (HasRequiredProviderFields(speak))
+        {
+            return true;
+        }
+
+        if (!speak.TryGetProperty("speak", out var providers) ||
+            providers.ValueKind != JsonValueKind.Array ||
+            providers.GetArrayLength() == 0)
+        {
+            return false;
+        }
+
+        foreach (var provider in providers.EnumerateArray())
+        {
+            if (!HasRequiredProviderFields(provider))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool HasNonEmptyStringProperty(JsonElement element, string name)
