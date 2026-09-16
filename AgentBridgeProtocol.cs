@@ -8,6 +8,7 @@ internal static class AgentBridgeProtocol
     internal const string InvalidSettingsCode = "INVALID_SETTINGS";
     internal const string InvalidSettingsDescription = "Invalid Settings message";
     internal const WebSocketCloseStatus InvalidSettingsCloseStatus = WebSocketCloseStatus.InternalServerError;
+    internal const Deepgram.Logger.LogLevel SdkLogLevel = Deepgram.Logger.LogLevel.Disable;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -50,7 +51,13 @@ internal static class AgentBridgeProtocol
                 !HasObjectProperty(root.GetProperty("audio"), "input") ||
                 !HasObjectProperty(root.GetProperty("audio"), "output") ||
                 !HasObjectProperty(root.GetProperty("agent"), "listen") ||
-                !HasObjectProperty(root.GetProperty("agent"), "think"))
+                !HasObjectProperty(root.GetProperty("agent"), "speak") ||
+                !HasObjectProperty(root.GetProperty("agent"), "think") ||
+                !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("input")) ||
+                !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("output")) ||
+                !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("listen")) ||
+                !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("speak")) ||
+                !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("think")))
             {
                 return false;
             }
@@ -85,5 +92,32 @@ internal static class AgentBridgeProtocol
     private static bool HasObjectProperty(JsonElement element, string name)
     {
         return element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Object;
+    }
+
+    private static bool HasRequiredAudioFields(JsonElement audio)
+    {
+        return HasNonEmptyStringProperty(audio, "encoding") && HasPositiveIntegerProperty(audio, "sample_rate");
+    }
+
+    private static bool HasRequiredProviderFields(JsonElement agent)
+    {
+        return HasObjectProperty(agent, "provider") &&
+            HasNonEmptyStringProperty(agent.GetProperty("provider"), "type") &&
+            HasNonEmptyStringProperty(agent.GetProperty("provider"), "model");
+    }
+
+    private static bool HasNonEmptyStringProperty(JsonElement element, string name)
+    {
+        return element.TryGetProperty(name, out var property) &&
+            property.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(property.GetString());
+    }
+
+    private static bool HasPositiveIntegerProperty(JsonElement element, string name)
+    {
+        return element.TryGetProperty(name, out var property) &&
+            property.ValueKind == JsonValueKind.Number &&
+            property.TryGetInt32(out var sampleRate) &&
+            sampleRate > 0;
     }
 }

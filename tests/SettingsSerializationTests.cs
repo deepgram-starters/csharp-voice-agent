@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Deepgram.Models.Agent.v2.WebSocket;
 using Xunit;
@@ -30,7 +31,63 @@ public class SettingsSerializationTests
         using var error = JsonDocument.Parse(AgentBridgeProtocol.CreateInvalidSettingsError());
         Assert.Equal("Error", error.RootElement.GetProperty("type").GetString());
         Assert.Equal("INVALID_SETTINGS", error.RootElement.GetProperty("code").GetString());
-        Assert.Equal(WebSocketCloseStatus.InternalServerError, AgentBridgeProtocol.InvalidSettingsCloseStatus);
+        Assert.Equal(1011, (int)AgentBridgeProtocol.InvalidSettingsCloseStatus);
+    }
+
+    public static IEnumerable<object[]> MissingRequiredSettingsFields()
+    {
+        string[][] paths =
+        [
+            ["type"],
+            ["audio"],
+            ["audio", "input"],
+            ["audio", "input", "encoding"],
+            ["audio", "input", "sample_rate"],
+            ["audio", "output"],
+            ["audio", "output", "encoding"],
+            ["audio", "output", "sample_rate"],
+            ["agent"],
+            ["agent", "listen"],
+            ["agent", "listen", "provider"],
+            ["agent", "listen", "provider", "type"],
+            ["agent", "listen", "provider", "model"],
+            ["agent", "speak"],
+            ["agent", "speak", "provider"],
+            ["agent", "speak", "provider", "type"],
+            ["agent", "speak", "provider", "model"],
+            ["agent", "think"],
+            ["agent", "think", "provider"],
+            ["agent", "think", "provider", "type"],
+            ["agent", "think", "provider", "model"],
+        ];
+
+        foreach (var path in paths)
+        {
+            var settings = JsonNode.Parse(ValidSettings)!.AsObject();
+            var parent = settings;
+            foreach (var segment in path[..^1])
+                parent = parent[segment]!.AsObject();
+
+            parent.Remove(path[^1]);
+            yield return [string.Join('.', path), settings.ToJsonString()];
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(MissingRequiredSettingsFields))]
+    public void SettingsMissingARequiredContractFieldReturnInvalidSettingsAnd1011(string field, string message)
+    {
+        Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), field);
+
+        using var error = JsonDocument.Parse(AgentBridgeProtocol.CreateInvalidSettingsError());
+        Assert.Equal("INVALID_SETTINGS", error.RootElement.GetProperty("code").GetString());
+        Assert.Equal(1011, (int)AgentBridgeProtocol.InvalidSettingsCloseStatus);
+    }
+
+    [Fact]
+    public void SdkLoggingIsDisabled()
+    {
+        Assert.Equal(Deepgram.Logger.LogLevel.Disable, AgentBridgeProtocol.SdkLogLevel);
     }
 
     [Fact]
@@ -101,6 +158,9 @@ public class SettingsSerializationTests
                     "language_hint": "en-US"
                   }
                 },
+                "speak": {
+                  "provider": { "type": "deepgram", "model": "aura-2-thalia-en" }
+                },
                 "think": {
                   "provider": { "type": "open_ai", "model": "gpt-4o-mini" },
                   "prompt": "Say \"hello\".\nThen ask a follow-up question."
@@ -127,4 +187,19 @@ public class SettingsSerializationTests
             .GetProperty("prompt")
             .GetString());
     }
+
+    private const string ValidSettings = """
+        {
+          "type": "Settings",
+          "audio": {
+            "input": { "encoding": "linear16", "sample_rate": 16000 },
+            "output": { "encoding": "linear16", "sample_rate": 16000 }
+          },
+          "agent": {
+            "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
+            "speak": { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } },
+            "think": { "provider": { "type": "open_ai", "model": "gpt-4o-mini" } }
+          }
+        }
+        """;
 }

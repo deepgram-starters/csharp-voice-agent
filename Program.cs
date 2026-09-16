@@ -127,8 +127,8 @@ static string LoadApiKey()
 
 var apiKey = LoadApiKey();
 
-// Disable SDK file logging so session settings and prompts never reach disk.
-Library.Initialize(Deepgram.Logger.LogLevel.Information, filename: null);
+// SDK Information logs include session settings, prompts, and custom endpoint headers.
+Library.Initialize(AgentBridgeProtocol.SdkLogLevel, filename: null);
 
 // ============================================================================
 // SETUP
