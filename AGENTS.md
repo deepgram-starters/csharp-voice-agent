@@ -85,7 +85,7 @@ Frontend: `cd frontend && corepack pnpm install`
 ## Customization Guide
 
 ### How the Agent Works
-The backend is an SDK-backed WebSocket bridge. It synthesizes the browser's initial `Welcome` message, converts the browser's first `Settings` message into the SDK's typed connection call, then forwards control messages, Agent events, and audio. Provider extension fields such as `version` and `language_hint` are preserved through the SDK's provider extension data; unknown Agent JSON events are forwarded unchanged.
+The backend is an SDK-backed WebSocket bridge. It synthesizes the browser's initial `Welcome` message with a new non-empty UUID `request_id` for each connection, converts the browser's first `Settings` message into the SDK's typed connection call, then forwards control messages, Agent events, and audio. Provider extension fields such as `version` and `language_hint` are preserved through the SDK's provider extension data; unknown Agent JSON events are forwarded unchanged.
 
 ### Agent Settings (sent from frontend)
 The frontend sends a `Settings` message after connecting:
