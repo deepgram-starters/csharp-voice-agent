@@ -84,12 +84,14 @@ public class SettingsSerializationTests
         Assert.Equal(1011, (int)AgentBridgeProtocol.InvalidSettingsCloseStatus);
     }
 
-    [Fact]
-    public void SettingsWithSpeakProviderArrayAreAccepted()
+    [Theory]
+    [InlineData(ValidSettings)]
+    [InlineData(ValidSettingsWithSpeakArray)]
+    [InlineData(ValidSettingsWithProviderAndSpeakArray)]
+    public void SettingsWithProviderOnlyArrayOnlyOrDualSpeakFormsAreAccepted(string message)
     {
-        Assert.True(AgentBridgeProtocol.TryParseInitialSettings(ValidSettingsWithSpeakArray, out var settings));
+        Assert.True(AgentBridgeProtocol.TryParseInitialSettings(message, out var settings));
         Assert.NotNull(settings);
-        Assert.Single(settings.Agent.Speak.SpeakProviders!);
     }
 
     public static IEnumerable<object[]> MalformedSpeakProviderArrays()
@@ -117,6 +119,35 @@ public class SettingsSerializationTests
     [Theory]
     [MemberData(nameof(MalformedSpeakProviderArrays))]
     public void SettingsWithMalformedSpeakProviderArrayReturnInvalidSettings(string form, string message)
+    {
+        Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), form);
+    }
+
+    public static IEnumerable<object[]> MalformedDualFormSpeakProviderArrays()
+    {
+        string[][] arrays =
+        [
+            ["empty", "[]"],
+            ["not an array", "{}"],
+            ["non-object entry", "[\"deepgram\"]"],
+            ["entry without provider", "[{}]"],
+            ["entry without provider type", "[{\"provider\":{\"model\":\"aura-2-thalia-en\"}}]"],
+            ["entry without provider model", "[{\"provider\":{\"type\":\"deepgram\"}}]"],
+            ["entry with blank provider model", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\" \"}}]"],
+            ["mixed valid and invalid entries", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\"aura-2-thalia-en\"}},{}]"],
+        ];
+
+        foreach (var array in arrays)
+        {
+            var settings = JsonNode.Parse(ValidSettings)!.AsObject();
+            settings["agent"]!.AsObject()["speak"]!.AsObject()["speak"] = JsonNode.Parse(array[1]);
+            yield return [array[0], settings.ToJsonString()];
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(MalformedDualFormSpeakProviderArrays))]
+    public void SettingsWithProviderAndMalformedSpeakProviderArrayReturnInvalidSettings(string form, string message)
     {
         Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), form);
     }
@@ -250,6 +281,26 @@ public class SettingsSerializationTests
           "agent": {
             "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
             "speak": {
+              "speak": [
+                { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } }
+              ]
+            },
+            "think": { "provider": { "type": "open_ai", "model": "gpt-4o-mini" } }
+          }
+        }
+        """;
+
+    private const string ValidSettingsWithProviderAndSpeakArray = """
+        {
+          "type": "Settings",
+          "audio": {
+            "input": { "encoding": "linear16", "sample_rate": 16000 },
+            "output": { "encoding": "linear16", "sample_rate": 16000 }
+          },
+          "agent": {
+            "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
+            "speak": {
+              "provider": { "type": "deepgram", "model": "aura-2-thalia-en" },
               "speak": [
                 { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } }
               ]

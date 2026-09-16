@@ -110,13 +110,12 @@ internal static class AgentBridgeProtocol
 
     private static bool HasRequiredSpeakFields(JsonElement speak)
     {
-        if (HasRequiredProviderFields(speak))
+        if (!speak.TryGetProperty("speak", out var providers))
         {
-            return true;
+            return HasRequiredProviderFields(speak);
         }
 
-        if (!speak.TryGetProperty("speak", out var providers) ||
-            providers.ValueKind != JsonValueKind.Array ||
+        if (providers.ValueKind != JsonValueKind.Array ||
             providers.GetArrayLength() == 0)
         {
             return false;
