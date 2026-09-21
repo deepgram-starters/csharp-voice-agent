@@ -56,7 +56,7 @@ internal static class AgentBridgeProtocol
                 !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("input")) ||
                 !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("output")) ||
                 !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("listen")) ||
-                !HasRequiredSpeakFields(root.GetProperty("agent").GetProperty("speak")) ||
+                !HasSimpleSpeakProvider(root.GetProperty("agent").GetProperty("speak")) ||
                 !HasRequiredProviderFields(root.GetProperty("agent").GetProperty("think")))
             {
                 return false;
@@ -64,6 +64,40 @@ internal static class AgentBridgeProtocol
 
             settings = JsonSerializer.Deserialize<SettingsSchema>(json);
             return settings != null;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool IsFallbackSpeakSettings(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !HasStringProperty(root, "type", "Settings") ||
+                !HasObjectProperty(root, "audio") ||
+                !HasObjectProperty(root, "agent") ||
+                !HasObjectProperty(root.GetProperty("audio"), "input") ||
+                !HasObjectProperty(root.GetProperty("audio"), "output") ||
+                !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("input")) ||
+                !HasRequiredAudioFields(root.GetProperty("audio").GetProperty("output")))
+            {
+                return false;
+            }
+
+            var agent = root.GetProperty("agent");
+            return agent.TryGetProperty("speak", out var speak) &&
+                speak.ValueKind == JsonValueKind.Array &&
+                speak.GetArrayLength() > 0 &&
+                agent.TryGetProperty("listen", out var listen) &&
+                agent.TryGetProperty("think", out var think) &&
+                HasRequiredProviderFields(listen) &&
+                HasRequiredProviderFields(think) &&
+                speak.EnumerateArray().All(HasRequiredProviderFields);
         }
         catch (JsonException)
         {
@@ -108,28 +142,9 @@ internal static class AgentBridgeProtocol
             HasNonEmptyStringProperty(agent.GetProperty("provider"), "model");
     }
 
-    private static bool HasRequiredSpeakFields(JsonElement speak)
+    private static bool HasSimpleSpeakProvider(JsonElement speak)
     {
-        if (!speak.TryGetProperty("speak", out var providers))
-        {
-            return HasRequiredProviderFields(speak);
-        }
-
-        if (providers.ValueKind != JsonValueKind.Array ||
-            providers.GetArrayLength() == 0)
-        {
-            return false;
-        }
-
-        foreach (var provider in providers.EnumerateArray())
-        {
-            if (!HasRequiredProviderFields(provider))
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return !speak.TryGetProperty("speak", out _) && HasRequiredProviderFields(speak);
     }
 
     private static bool HasNonEmptyStringProperty(JsonElement element, string name)

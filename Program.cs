@@ -47,6 +47,7 @@ DotNetEnv.Env.Load();
 var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 8081;
 var host = Environment.GetEnvironmentVariable("HOST") ?? "0.0.0.0";
 var frontendPort = int.TryParse(Environment.GetEnvironmentVariable("FRONTEND_PORT"), out var fp) ? fp : 8080;
+const string DeepgramAgentUrl = "wss://agent.deepgram.com/v1/agent/converse";
 
 // ============================================================================
 // SESSION AUTH - JWT tokens with rate limiting for production security
@@ -172,6 +173,53 @@ app.MapGet("/api/session", () =>
 // HELPER FUNCTIONS
 // ============================================================================
 
+static async Task ForwardRawMessages(WebSocket source, WebSocket destination, CancellationToken cancellationToken)
+{
+    var buffer = new byte[8192];
+    while (source.State == WebSocketState.Open && destination.State == WebSocketState.Open)
+    {
+        var result = await source.ReceiveAsync(buffer, cancellationToken);
+        if (result.MessageType == WebSocketMessageType.Close)
+        {
+            await destination.CloseAsync(
+                result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                result.CloseStatusDescription ?? "Connection closed",
+                cancellationToken);
+            return;
+        }
+
+        await destination.SendAsync(
+            buffer.AsMemory(0, result.Count),
+            result.MessageType,
+            result.EndOfMessage,
+            cancellationToken);
+    }
+}
+
+static async Task HandleFallbackSpeakSettings(
+    WebSocket clientWs,
+    string apiKey,
+    string settingsJson,
+    CancellationToken appCt)
+{
+    using var deepgramWs = new ClientWebSocket();
+    deepgramWs.Options.SetRequestHeader("Authorization", $"Token {apiKey}");
+    await deepgramWs.ConnectAsync(new Uri(DeepgramAgentUrl), appCt);
+    await deepgramWs.SendAsync(
+        Encoding.UTF8.GetBytes(settingsJson),
+        WebSocketMessageType.Text,
+        true,
+        appCt);
+
+    using var bridgeCts = CancellationTokenSource.CreateLinkedTokenSource(appCt);
+    var clientToDeepgram = ForwardRawMessages(clientWs, deepgramWs, bridgeCts.Token);
+    var deepgramToClient = ForwardRawMessages(deepgramWs, clientWs, bridgeCts.Token);
+    await Task.WhenAny(clientToDeepgram, deepgramToClient);
+    bridgeCts.Cancel();
+    try { await Task.WhenAll(clientToDeepgram, deepgramToClient); }
+    catch (OperationCanceledException) { }
+}
+
 /// Handles a single session between a browser client and the Deepgram Voice Agent.
 ///
 /// The browser-facing WebSocket is unchanged: the client still drives the agent
@@ -293,6 +341,13 @@ async Task HandleAgentStream(WebSocket clientWs, string apiKey, CancellationToke
             var text = Encoding.UTF8.GetString(payload);
             if (!connected)
             {
+                if (AgentBridgeProtocol.IsFallbackSpeakSettings(text))
+                {
+                    Console.WriteLine($"[{connectionId}] Connecting to Deepgram Agent API with fallback voices...");
+                    await HandleFallbackSpeakSettings(clientWs, apiKey, text, appCt);
+                    return;
+                }
+
                 // The first Settings message establishes the upstream connection.
                 if (!AgentBridgeProtocol.TryParseInitialSettings(text, out var settings))
                 {

@@ -86,12 +86,24 @@ public class SettingsSerializationTests
 
     [Theory]
     [InlineData(ValidSettings)]
-    [InlineData(ValidSettingsWithSpeakArray)]
-    [InlineData(ValidSettingsWithProviderAndSpeakArray)]
-    public void SettingsWithProviderOnlyArrayOnlyOrDualSpeakFormsAreAccepted(string message)
+    public void SettingsWithSingleSpeakProviderUsesTheSdkBridge(string message)
     {
         Assert.True(AgentBridgeProtocol.TryParseInitialSettings(message, out var settings));
         Assert.NotNull(settings);
+    }
+
+    [Fact]
+    public void SettingsWithFallbackSpeakArrayUsesTheRawBridge()
+    {
+        Assert.False(AgentBridgeProtocol.TryParseInitialSettings(ValidSettingsWithSpeakArray, out _));
+        Assert.True(AgentBridgeProtocol.IsFallbackSpeakSettings(ValidSettingsWithSpeakArray));
+    }
+
+    [Fact]
+    public void NestedSpeakProviderArraysAreRejected()
+    {
+        Assert.False(AgentBridgeProtocol.TryParseInitialSettings(ValidSettingsWithProviderAndSpeakArray, out _));
+        Assert.False(AgentBridgeProtocol.IsFallbackSpeakSettings(ValidSettingsWithProviderAndSpeakArray));
     }
 
     public static IEnumerable<object[]> MalformedSpeakProviderArrays()
@@ -111,7 +123,7 @@ public class SettingsSerializationTests
         foreach (var array in arrays)
         {
             var settings = JsonNode.Parse(ValidSettings)!.AsObject();
-            settings["agent"]!.AsObject()["speak"] = JsonNode.Parse($$"""{ "speak": {{array[1]}} }""");
+            settings["agent"]!.AsObject()["speak"] = JsonNode.Parse(array[1]);
             yield return [array[0], settings.ToJsonString()];
         }
     }
@@ -121,6 +133,7 @@ public class SettingsSerializationTests
     public void SettingsWithMalformedSpeakProviderArrayReturnInvalidSettings(string form, string message)
     {
         Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), form);
+        Assert.False(AgentBridgeProtocol.IsFallbackSpeakSettings(message), form);
     }
 
     public static IEnumerable<object[]> MalformedDualFormSpeakProviderArrays()
@@ -150,6 +163,7 @@ public class SettingsSerializationTests
     public void SettingsWithProviderAndMalformedSpeakProviderArrayReturnInvalidSettings(string form, string message)
     {
         Assert.False(AgentBridgeProtocol.TryParseInitialSettings(message, out _), form);
+        Assert.False(AgentBridgeProtocol.IsFallbackSpeakSettings(message), form);
     }
 
     [Fact]
@@ -280,11 +294,9 @@ public class SettingsSerializationTests
           },
           "agent": {
             "listen": { "provider": { "type": "deepgram", "model": "nova-3" } },
-            "speak": {
-              "speak": [
-                { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } }
-              ]
-            },
+            "speak": [
+              { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } }
+            ],
             "think": { "provider": { "type": "open_ai", "model": "gpt-4o-mini" } }
           }
         }
