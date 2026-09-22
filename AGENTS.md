@@ -120,7 +120,7 @@ The frontend sends a `Settings` message after connecting:
 | **Think** (LLM) | `agent.think.provider.model` | `gpt-4o-mini`, `gpt-4o`, etc. | LLM model |
 | **Prompt** | `agent.think.prompt` | Any system prompt | Agent personality/behavior |
 
-Fallback voice chains use an API-valid `agent.speak` array. The bridge forwards this form directly because the SDK's typed Settings model cannot represent it:
+Fallback voice chains use an API-valid `agent.speak` array. The bridge forwards this form directly because the SDK's typed Settings model cannot represent it. Each entry needs `provider.type`; provider-specific fields (for example, Deepgram `model`, Cartesia `model_id` and `voice`, or ElevenLabs `voice_id`) pass through unchanged:
 
 ```json
 "speak": [

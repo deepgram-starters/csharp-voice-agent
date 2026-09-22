@@ -100,6 +100,28 @@ public class SettingsSerializationTests
     }
 
     [Fact]
+    public void FallbackSpeakArraysAllowProviderSpecificFields()
+    {
+        const string crossProviderFallback = """
+            {
+              "type":"Settings",
+              "audio":{"input":{"encoding":"linear16","sample_rate":16000},"output":{"encoding":"linear16","sample_rate":16000}},
+              "agent":{
+                "listen":{"provider":{"type":"deepgram","model":"nova-3"}},
+                "speak":[
+                  {"provider":{"type":"deepgram","model":"aura-2-thalia-en"}},
+                  {"provider":{"type":"cartesia","model_id":"sonic-2","voice":"abc123"}},
+                  {"provider":{"type":"elevenlabs","voice_id":"21m00Tcm4TlvDq8ikWAM"}}
+                ],
+                "think":{"provider":{"type":"open_ai","model":"gpt-4o-mini"}}
+              }
+            }
+            """;
+
+        Assert.True(AgentBridgeProtocol.IsFallbackSpeakSettings(crossProviderFallback));
+    }
+
+    [Fact]
     public void NestedSpeakProviderArraysAreRejected()
     {
         Assert.False(AgentBridgeProtocol.TryParseInitialSettings(ValidSettingsWithProviderAndSpeakArray, out _));
@@ -115,8 +137,6 @@ public class SettingsSerializationTests
             ["non-object entry", "[\"deepgram\"]"],
             ["entry without provider", "[{}]"],
             ["entry without provider type", "[{\"provider\":{\"model\":\"aura-2-thalia-en\"}}]"],
-            ["entry without provider model", "[{\"provider\":{\"type\":\"deepgram\"}}]"],
-            ["entry with blank provider model", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\" \"}}]"],
             ["mixed valid and invalid entries", "[{\"provider\":{\"type\":\"deepgram\",\"model\":\"aura-2-thalia-en\"}},{}]"],
         ];
 
@@ -170,6 +190,22 @@ public class SettingsSerializationTests
     public void SdkLoggingIsDisabled()
     {
         Assert.Equal(Deepgram.Logger.LogLevel.Disable, AgentBridgeProtocol.SdkLogLevel);
+    }
+
+    [Fact]
+    public void FallbackBridgeSuppressesOnlyTheUpstreamWelcome()
+    {
+        Assert.True(AgentBridgeProtocol.IsWelcomeMessage("{\"type\":\"Welcome\"}"u8));
+        Assert.False(AgentBridgeProtocol.IsWelcomeMessage("{\"type\":\"SettingsApplied\"}"u8));
+        Assert.False(AgentBridgeProtocol.IsWelcomeMessage("not-json"u8));
+    }
+
+    [Fact]
+    public void ConnectionFailureUsesTheBrowserErrorContract()
+    {
+        using var error = JsonDocument.Parse(AgentBridgeProtocol.CreateConnectionFailedError());
+        Assert.Equal("Error", error.RootElement.GetProperty("type").GetString());
+        Assert.Equal("CONNECTION_FAILED", error.RootElement.GetProperty("code").GetString());
     }
 
     [Fact]

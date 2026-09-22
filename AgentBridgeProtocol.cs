@@ -12,7 +12,7 @@ internal static class AgentBridgeProtocol
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true,
+        WriteIndented = false,
     };
 
     internal readonly record struct OutboundMessage(byte[] Payload, WebSocketMessageType Type);
@@ -31,6 +31,15 @@ internal static class AgentBridgeProtocol
         {
             Code = InvalidSettingsCode,
             Description = InvalidSettingsDescription,
+        }, JsonOptions);
+    }
+
+    internal static string CreateConnectionFailedError()
+    {
+        return JsonSerializer.Serialize(new ErrorResponse
+        {
+            Code = "CONNECTION_FAILED",
+            Description = "Failed to connect to Deepgram Agent",
         }, JsonOptions);
     }
 
@@ -97,7 +106,20 @@ internal static class AgentBridgeProtocol
                 agent.TryGetProperty("think", out var think) &&
                 HasRequiredProviderFields(listen) &&
                 HasRequiredProviderFields(think) &&
-                speak.EnumerateArray().All(HasRequiredProviderFields);
+                speak.EnumerateArray().All(HasFallbackSpeakProvider);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool IsWelcomeMessage(ReadOnlySpan<byte> payload)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payload.ToArray());
+            return HasStringProperty(document.RootElement, "type", "Welcome");
         }
         catch (JsonException)
         {
@@ -145,6 +167,14 @@ internal static class AgentBridgeProtocol
     private static bool HasSimpleSpeakProvider(JsonElement speak)
     {
         return !speak.TryGetProperty("speak", out _) && HasRequiredProviderFields(speak);
+    }
+
+    private static bool HasFallbackSpeakProvider(JsonElement speak)
+    {
+        // A fallback chain can cross TTS providers, so only require the shared
+        // discriminator and leave provider-specific settings untouched.
+        return HasObjectProperty(speak, "provider") &&
+            HasNonEmptyStringProperty(speak.GetProperty("provider"), "type");
     }
 
     private static bool HasNonEmptyStringProperty(JsonElement element, string name)
