@@ -6,7 +6,7 @@ repository = "https://github.com/deepgram-starters/csharp-voice-agent"
 useCase = "voice-agent"
 language = "csharp"
 framework = "dotnet"
-sdk = "N/A"
+sdk = "7.1.1"
 tags = ["voice-agent", "conversational-ai", "voice-ai", "voice-bot", "websocket", "csharp", "dotnet"]
 
 # Check prerequisites

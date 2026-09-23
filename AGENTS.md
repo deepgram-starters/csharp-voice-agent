@@ -14,7 +14,9 @@ C# (.NET) demo app for Deepgram Voice Agent.
 
 | File | Purpose |
 |------|---------|
-| `Program.cs` | Main backend — API endpoints and WebSocket proxy |
+| `Program.cs` | Main backend — API endpoints and SDK-backed WebSocket bridge |
+| `AgentBridgeProtocol.cs` | Settings validation and browser protocol helpers |
+| `tests/` | Offline bridge protocol tests |
 | `deepgram.toml` | Metadata, lifecycle commands, tags |
 | `Makefile` | Standardized build/run targets |
 | `sample.env` | Environment variable template |
@@ -67,7 +69,7 @@ make init
 
 ## Dependencies
 
-- **Backend:** `*.csproj` — Uses .NET SDK with NuGet packages. Some WebSocket starters use DotNetEnv+Tomlyn (no Deepgram SDK).
+- **Backend:** `*.csproj` — Uses the Deepgram .NET SDK, DotNetEnv, and Tomlyn.
 - **Frontend:** `frontend/package.json` — Vite dev server
 - **Submodules:** `frontend/` (voice-agent-html), `contracts/` (starter-contracts)
 
@@ -85,7 +87,7 @@ Frontend: `cd frontend && corepack pnpm install`
 ## Customization Guide
 
 ### How the Agent Works
-The backend is a **pure WebSocket proxy** — it forwards messages between the browser and Deepgram's Agent API. All agent configuration happens via JSON messages from the frontend.
+The backend is an SDK-backed WebSocket bridge. It synthesizes the browser's initial `Welcome` message with a new non-empty UUID `request_id` for each connection, converts the browser's first `Settings` message into the SDK's typed connection call, then forwards control messages, Agent events, and audio. Provider extension fields such as `version` and `language_hint` are preserved through the SDK's provider extension data; unknown Agent JSON events are forwarded unchanged.
 
 ### Agent Settings (sent from frontend)
 The frontend sends a `Settings` message after connecting:
@@ -118,9 +120,18 @@ The frontend sends a `Settings` message after connecting:
 | **Think** (LLM) | `agent.think.provider.model` | `gpt-4o-mini`, `gpt-4o`, etc. | LLM model |
 | **Prompt** | `agent.think.prompt` | Any system prompt | Agent personality/behavior |
 
+Fallback voice chains use an API-valid `agent.speak` array. The bridge forwards this form directly because the SDK's typed Settings model cannot represent it. Each entry needs `provider.type`; provider-specific fields (for example, Deepgram `model`, Cartesia `model_id` and `voice`, or ElevenLabs `voice_id`) pass through unchanged:
+
+```json
+"speak": [
+  { "provider": { "type": "deepgram", "model": "aura-2-thalia-en" } },
+  { "provider": { "type": "deepgram", "model": "aura-2-asteria-en" } }
+]
+```
+
 ### Live Updates (no reconnect needed)
 The frontend can update these settings mid-conversation:
-- `{ "type": "UpdateSpeak", "model": "aura-2-luna-en" }` — Change voice
+- `{ "type": "UpdateSpeak", "speak": { "provider": { "type": "deepgram", "model": "aura-2-luna-en" } } }` — Change voice
 - `{ "type": "UpdatePrompt", "prompt": "New instructions..." }` — Change prompt
 - `{ "type": "InjectUserMessage", "content": "text" }` — Send text as user
 
@@ -167,8 +178,8 @@ The frontend is a git submodule from `deepgram-starters/voice-agent-html`. To mo
 ### Adding a UI Control for a New Feature
 1. Add the HTML element in `frontend/index.html` (input, checkbox, dropdown, etc.)
 2. Read the value in `frontend/main.js` when making the API call or opening the WebSocket
-3. Pass it as a query parameter in the WebSocket URL
-4. Handle it in the backend `Program.cs` — read the param and pass it to the Deepgram API
+3. Include it in the initial Settings message or an Agent control message
+4. Handle it in the backend `Program.cs` and preserve its Agent API wire shape
 
 ## Environment Variables
 
@@ -195,6 +206,9 @@ chore(deps): update frontend submodule
 ```bash
 # Run conformance tests (requires app to be running)
 make test
+
+# Run offline bridge protocol tests
+make test-unit
 
 # Manual endpoint check
 curl -sf http://localhost:8081/api/metadata | python3 -m json.tool

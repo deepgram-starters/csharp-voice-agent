@@ -9,6 +9,7 @@
 
 # Environment
 .env
+log.txt
 
 # Frontend
 frontend/node_modules/
